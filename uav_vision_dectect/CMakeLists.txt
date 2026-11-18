@@ -32,8 +32,6 @@ include_directories(${OpenCV_INCLUDE_DIRS})
 
 # ONNX Runtime
 find_library(ONNXRUNTIME_LIB onnxruntime PATHS /usr/local/lib REQUIRED)
-find_library(ONNXRUNTIME_CUDA_LIB onnxruntime_providers_cuda PATHS /usr/local/lib)
-find_library(ONNXRUNTIME_SHARED_LIB onnxruntime_providers_shared PATHS /usr/local/lib)
 include_directories(/usr/local/include)
 message(STATUS "ONNX Runtime: ${ONNXRUNTIME_LIB}")
 
@@ -61,8 +59,6 @@ target_link_libraries(uav_vision_dectect
         ${OpenCV_LIBS}
         ${OpenMP_CXX_LIBRARIES}
         ${ONNXRUNTIME_LIB}
-        ${ONNXRUNTIME_CUDA_LIB}
-        ${ONNXRUNTIME_SHARED_LIB}
 )
 
 #添加节点的依赖

@@ -43,10 +43,20 @@ VisionPNG::VisionPNG() : Node("uav_vision_png")
     this->declare_parameter("d_gain",             d_gain_);
     this->declare_parameter("kv",                 kv_);
     this->declare_parameter("kz",                 kz_);
+    this->declare_parameter("los_limit_low_speed_mps", los_limit_low_speed_mps_);
+    this->declare_parameter("los_limit_mid_speed_mps", los_limit_mid_speed_mps_);
+    this->declare_parameter("los_limit_low_angle_deg", los_limit_low_angle_deg_);
+    this->declare_parameter("los_limit_mid_angle_deg", los_limit_mid_angle_deg_);
+    this->declare_parameter("max_velocity_los_angle_deg", max_velocity_los_angle_deg_);
+    this->declare_parameter("initial_los_angle_deg", initial_los_angle_deg_);
+    this->declare_parameter("initial_los_max_duration_s", initial_los_max_duration_s_);
+    this->declare_parameter("initial_los_exit_speed_mps", initial_los_exit_speed_mps_);
+    this->declare_parameter("initial_los_transition_duration_s", initial_los_transition_duration_s_);
     this->declare_parameter("k1_yaw",             k1_yaw_);
     this->declare_parameter("k2_yaw",             k2_yaw_);
     this->declare_parameter("k_ey",               k_ey_);
     this->declare_parameter("standby_altitude",   standby_altitude_);
+    this->declare_parameter("detection_confirm_frames", detection_confirm_frames_);
     this->declare_parameter("coast_thresh",       coast_thresh_);
     this->declare_parameter("lost_thresh",        lost_thresh_);
     this->declare_parameter("hit_radius",         (double)hit_radius_);
@@ -60,10 +70,36 @@ VisionPNG::VisionPNG() : Node("uav_vision_png")
     d_gain_            = this->get_parameter("d_gain").as_double();
     kv_                = this->get_parameter("kv").as_double();
     kz_                = this->get_parameter("kz").as_double();
+    los_limit_low_speed_mps_ = std::max(
+        0.0, this->get_parameter("los_limit_low_speed_mps").as_double());
+    los_limit_mid_speed_mps_ = std::max(
+        los_limit_low_speed_mps_ + 0.1,
+        this->get_parameter("los_limit_mid_speed_mps").as_double());
+    max_velocity_los_angle_deg_ = std::max(
+        0.0, std::min(180.0,
+            this->get_parameter("max_velocity_los_angle_deg").as_double()));
+    los_limit_low_angle_deg_ = std::max(
+        0.0, std::min(max_velocity_los_angle_deg_,
+            this->get_parameter("los_limit_low_angle_deg").as_double()));
+    los_limit_mid_angle_deg_ = std::max(
+        los_limit_low_angle_deg_, std::min(max_velocity_los_angle_deg_,
+            this->get_parameter("los_limit_mid_angle_deg").as_double()));
+    initial_los_angle_deg_ = std::max(
+        0.0, std::min(max_velocity_los_angle_deg_,
+            this->get_parameter("initial_los_angle_deg").as_double()));
+    initial_los_max_duration_s_ = std::max(
+        0.0, this->get_parameter("initial_los_max_duration_s").as_double());
+    initial_los_exit_speed_mps_ = std::max(
+        0.0, this->get_parameter("initial_los_exit_speed_mps").as_double());
+    initial_los_transition_duration_s_ = std::max(
+        0.01, this->get_parameter("initial_los_transition_duration_s").as_double());
     k1_yaw_            = this->get_parameter("k1_yaw").as_double();
     k2_yaw_            = this->get_parameter("k2_yaw").as_double();
     k_ey_              = this->get_parameter("k_ey").as_double();
     standby_altitude_  = this->get_parameter("standby_altitude").as_double();
+    detection_confirm_frames_ = std::max(
+        1, static_cast<int>(
+            this->get_parameter("detection_confirm_frames").as_int()));
     coast_thresh_      = this->get_parameter("coast_thresh").as_int();
     lost_thresh_       = this->get_parameter("lost_thresh").as_int();
     hit_radius_        = (float)this->get_parameter("hit_radius").as_double();
@@ -101,19 +137,44 @@ VisionPNG::VisionPNG() : Node("uav_vision_png")
             detect_fresh_ = true;
 
             if (msg->width == -1) {
+                if (valid_detection_streak_ > 0) {
+                    RCLCPP_INFO(get_logger(),
+                        "[LOCK] 检测中断，连续有效帧由 %d 清零",
+                        valid_detection_streak_);
+                }
+                valid_detection_streak_ = 0;
                 lost_frames_++;
             } else {
                 lost_frames_ = 0;
-                // 检测有效：若正在 SEARCHING，切换到拦截
+                // 仅首次搜索阶段要求连续多帧有效，避免起飞后被单帧误检触发。
                 if (state_ == VpngState::SEARCHING) {
-                    RCLCPP_INFO(get_logger(), "→ 视觉检测到目标，进入 INTERCEPT");
+                    valid_detection_streak_++;
+                    RCLCPP_INFO(get_logger(),
+                        "[LOCK] 连续有效检测 %d/%d",
+                        valid_detection_streak_, detection_confirm_frames_);
+
+                    if (valid_detection_streak_ >= detection_confirm_frames_) {
+                        valid_detection_streak_ = 0;
+                        png_initialized_ = false;
+                        initial_los_limit_active_ = true;
+                        initial_los_transition_started_ = false;
+                        initial_los_limit_start_time_ = std::chrono::steady_clock::now();
+                        state_ = VpngState::INTERCEPT;
+                        RCLCPP_INFO(get_logger(),
+                            "→ 连续检测确认，进入 INTERCEPT；首次 LOS 限制 %.1fdeg 已启用",
+                            initial_los_angle_deg_);
+                    }
+                } else if (state_ == VpngState::TRACK_LOST) {
+                    // 飞行过程中重新捕获目标时立即恢复，不重复等待确认帧。
+                    valid_detection_streak_ = 0;
+                    png_initialized_ = false;
+                    initial_los_limit_active_ = false;
+                    initial_los_transition_started_ = false;
                     state_ = VpngState::INTERCEPT;
-                }
-                // 若目标重新出现（从 TRACK_LOST 恢复）
-                if (state_ == VpngState::TRACK_LOST) {
-                    RCLCPP_INFO(get_logger(), "→ 目标重新出现，恢复 INTERCEPT");
-                    png_initialized_ = false;  // 重新初始化 PNG
-                    state_ = VpngState::INTERCEPT;
+                    RCLCPP_INFO(get_logger(),
+                        "→ 目标重新出现，立即恢复 INTERCEPT");
+                } else {
+                    valid_detection_streak_ = 0;
                 }
             }
 
@@ -210,12 +271,20 @@ VisionPNG::VisionPNG() : Node("uav_vision_png")
 
     // 20 Hz 视觉 PNG LOS 计算
     timer_png_ = create_wall_timer(
-        std::chrono::milliseconds(25),
+        std::chrono::microseconds(16667),
         std::bind(&VisionPNG::png_calculate, this));
 
     RCLCPP_INFO(get_logger(),
-        "VisionPNG 节点已启动 | focal=%.1f img=%dx%d N=%.1f spd=%.1f",
-        focal_length_, image_width_, image_height_, N_png_, speed_cmd_);
+        "VisionPNG 节点已启动 | focal=%.1f img=%dx%d N=%.1f spd=%.1f confirm=%d "
+        "LOS_limit=%.0fdeg@<=%.0fm/s -> %.0fdeg@%.0fm/s -> %.0fdeg@spd_max | "
+        "initial=%.0fdeg exit@%.0fm/s/%.1fs blend=%.1fs",
+        focal_length_, image_width_, image_height_, N_png_, speed_cmd_,
+        detection_confirm_frames_,
+        los_limit_low_angle_deg_, los_limit_low_speed_mps_,
+        los_limit_mid_angle_deg_, los_limit_mid_speed_mps_,
+        max_velocity_los_angle_deg_,
+        initial_los_angle_deg_, initial_los_exit_speed_mps_,
+        initial_los_max_duration_s_, initial_los_transition_duration_s_);
 }
 
 // ============================================================
@@ -329,6 +398,8 @@ void VisionPNG::png_calculate()
     while (diff_LOS_v >  M_PI) diff_LOS_v -= 2.0 * M_PI;
     while (diff_LOS_v < -M_PI) diff_LOS_v += 2.0 * M_PI;
 
+    bool png_angle_updated = false;
+
     // LOS 变化量足够大才更新（与 los_control.cpp 阈值 0.02 一致）
     if (std::abs(diff_LOS_v) > 0.02 || std::abs(diff_LOS_z) > 0.02) {
         // 用「上一帧的期望速度角」作为 PNG 基准（固定参考，不跟随实测速度）
@@ -340,13 +411,110 @@ void VisionPNG::png_calculate()
         // 限制仰角范围（±45°），防止仰角过大导致无人机猛冲高空
         d_v_angle_v_ = std::max(-M_PI/4.0, std::min(M_PI/4.0, d_v_angle_v_));
 
-        // 更新 last_v_angle 为本次期望值（迭代更新）
+        // 俯仰期望角可直接更新；水平期望角需要在 LOS 夹角限制后再更新
         last_v_angle_v_ = d_v_angle_v_;
-        last_v_angle_z_ = d_v_angle_z_;
 
         last_LOS_angle_v_ = LOS_angle_v_;
         last_LOS_angle_z_ = LOS_angle_z_;
 
+        png_angle_updated = true;
+    }
+
+    // 按当前实际水平速度动态计算与 LOS 的最大允许夹角：
+    //   <= 8m/s: 30deg; 8~10m/s: 30deg 线性增至 45deg;
+    //   10m/s ~ speed_cmd: 45deg 线性增至高速上限（默认 55deg）。
+    const double horizontal_speed = std::hypot(vx_, vy_);
+    double dynamic_los_limit_deg = los_limit_low_angle_deg_;
+
+    if (horizontal_speed > los_limit_low_speed_mps_ &&
+        horizontal_speed <= los_limit_mid_speed_mps_) {
+        const double ratio =
+            (horizontal_speed - los_limit_low_speed_mps_) /
+            (los_limit_mid_speed_mps_ - los_limit_low_speed_mps_);
+        dynamic_los_limit_deg = los_limit_low_angle_deg_ +
+            ratio * (los_limit_mid_angle_deg_ - los_limit_low_angle_deg_);
+    } else if (horizontal_speed > los_limit_mid_speed_mps_) {
+        const double high_speed_span = std::max(
+            0.1, speed_cmd_ - los_limit_mid_speed_mps_);
+        const double ratio = std::max(
+            0.0, std::min(1.0,
+                (horizontal_speed - los_limit_mid_speed_mps_) / high_speed_span));
+        dynamic_los_limit_deg = los_limit_mid_angle_deg_ +
+            ratio * (max_velocity_los_angle_deg_ - los_limit_mid_angle_deg_);
+    }
+
+    // 仅首次进入拦截时使用更小的 LOS 夹角限制，优先缩小初始横向间隔。
+    // 达到指定水平速度或最长保持时间后，平滑恢复常规动态限制。
+    double active_los_limit_deg = dynamic_los_limit_deg;
+    if (initial_los_limit_active_) {
+        const auto now = std::chrono::steady_clock::now();
+        const double initial_elapsed_s =
+            std::chrono::duration<double>(now - initial_los_limit_start_time_).count();
+
+        if (!initial_los_transition_started_ &&
+            (horizontal_speed >= initial_los_exit_speed_mps_ ||
+             initial_elapsed_s >= initial_los_max_duration_s_)) {
+            initial_los_transition_started_ = true;
+            initial_los_transition_start_time_ = now;
+            RCLCPP_INFO(get_logger(),
+                "[PNG/INITIAL] 开始退出初始限制 | elapsed=%.2fs hspd=%.2fm/s blend=%.2fs",
+                initial_elapsed_s, horizontal_speed,
+                initial_los_transition_duration_s_);
+        }
+
+        if (!initial_los_transition_started_) {
+            active_los_limit_deg = initial_los_angle_deg_;
+        } else {
+            const double transition_elapsed_s =
+                std::chrono::duration<double>(
+                    now - initial_los_transition_start_time_).count();
+            const double blend_ratio = std::max(
+                0.0, std::min(1.0,
+                    transition_elapsed_s / initial_los_transition_duration_s_));
+
+            active_los_limit_deg = initial_los_angle_deg_ +
+                blend_ratio * (dynamic_los_limit_deg - initial_los_angle_deg_);
+
+            if (blend_ratio >= 1.0) {
+                initial_los_limit_active_ = false;
+                initial_los_transition_started_ = false;
+                active_los_limit_deg = dynamic_los_limit_deg;
+                RCLCPP_INFO(get_logger(),
+                    "[PNG/INITIAL] 初始限制退出完成，恢复动态 LOS 限制 %.1fdeg",
+                    dynamic_los_limit_deg);
+            }
+        }
+    }
+
+    // 将水平期望速度方向限制在当前目标 LOS 的当前有效夹角内。
+    // 先把角差归一化到 [-pi, pi]，避免 LOS 在 ±180° 附近时误判为超大夹角。
+    double velocity_los_angle = d_v_angle_z_ - LOS_angle_z_;
+    while (velocity_los_angle >  M_PI) velocity_los_angle -= 2.0 * M_PI;
+    while (velocity_los_angle < -M_PI) velocity_los_angle += 2.0 * M_PI;
+
+    const double max_velocity_los_angle =
+        active_los_limit_deg * M_PI / 180.0;
+    const double limited_velocity_los_angle = std::max(
+        -max_velocity_los_angle,
+        std::min(max_velocity_los_angle, velocity_los_angle));
+
+    if (std::abs(limited_velocity_los_angle - velocity_los_angle) > 1e-6) {
+        d_v_angle_z_ = LOS_angle_z_ + limited_velocity_los_angle;
+        while (d_v_angle_z_ >  M_PI) d_v_angle_z_ -= 2.0 * M_PI;
+        while (d_v_angle_z_ < -M_PI) d_v_angle_z_ += 2.0 * M_PI;
+
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 500,
+            "[PNG/LIMIT] hspd=%.1fm/s limit=%.1fdeg | 水平速度-LOS 夹角 %.1fdeg 已限制为 %.1fdeg",
+            horizontal_speed,
+            active_los_limit_deg,
+            velocity_los_angle * 180.0 / M_PI,
+            limited_velocity_los_angle * 180.0 / M_PI);
+    }
+
+    // 下一次 PNG 迭代从限制后的合法方向继续，不保留越界角度。
+    last_v_angle_z_ = d_v_angle_z_;
+
+    if (png_angle_updated) {
         RCLCPP_INFO(get_logger(),
             "[PNG] ex=%.1f ey=%.1f | LOS(v=%.3f z=%.3f) | dLOS(v=%.3f z=%.3f) | dV(v=%.3f z=%.3f)",
             ex_, ey_,
@@ -411,10 +579,11 @@ void VisionPNG::handle_takeoff()
 
     // 高度到位且悬停推力已收敛
     float alt_err = std::abs(local_z_ - (float)standby_altitude_);
-    if (hover_thrust_ok_ && alt_err < 0.5f) {
+    if (alt_err < 0.5f && std::abs(vz_) < 0.3f) {
         RCLCPP_INFO(get_logger(),
             "→ 起飞完成 z=%.2f hover_thrust=%.3f，进入 SEARCHING",
             local_z_, hover_thrust_);
+        valid_detection_streak_ = 0;
         state_ = VpngState::SEARCHING;
     } else {
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,

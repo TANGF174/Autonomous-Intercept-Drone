@@ -10,7 +10,7 @@
 
 
 // 定义模型路径 (建议改为 ROS2 参数加载)
-const std::string YOLO_ENGINE_PATH = "src/uav_vision_dectect/model/yolov5/GDUT_UAV.onnx";
+const std::string YOLO_ENGINE_PATH = "/home/ubuntu22/Autonomous-Intercept-Drone/uav_vision_dectect/model/yolov5/GDUT_UAV.onnx";
 
 void UavTopicSubscrib::initTensorRT()
 {
@@ -45,8 +45,8 @@ UavTopicSubscrib::~UavTopicSubscrib()
 UavTopicSubscrib::UavTopicSubscrib() : Node("uav_vision_dectect")
 {
     /***********************************局部跟踪器初始化***********************************/
-    std::string init_model = "/home/verser/ros2_ws/src/uav_vision_dectect/model/light_track/lighttrack_init";
-    std::string update_model = "/home/verser/ros2_ws/src/uav_vision_dectect/model/light_track/lighttrack_update";
+    std::string init_model = "/home/ubuntu22/Autonomous-Intercept-Drone/uav_vision_dectect/model/light_track/lighttrack_init";
+    std::string update_model = "/home/ubuntu22/Autonomous-Intercept-Drone/uav_vision_dectect/model/light_track/lighttrack_update";
 
     siam_tracker = new LightTrack(init_model.c_str(), update_model.c_str());
 
@@ -154,8 +154,18 @@ void UavTopicSubscrib::image_callback(const sensor_msgs::msg::Image::SharedPtr m
             }
         }
 
+        // 调试远距离小目标：打印通过检测器内部 0.4 门限的候选框数量和最高置信度。
+        // 使用节流日志，避免按相机帧率持续刷屏。
+        RCLCPP_INFO_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            500,
+            "[YOLO DEBUG] candidates=%zu best_score=%.3f",
+            results.size(),
+            best_score);
+
         // --- 检测结果处理 ---
-        if (has_valid_detection && best_score > 0.8) // 0.3 为业务逻辑的过滤阈值，可调
+        if (has_valid_detection && best_score >= 0.70f) // 0.70 为业务逻辑的过滤阈值，可调
         {
             cv::Rect safe_rect = best_rect & cv::Rect(0, 0, frame.cols, frame.rows);
             

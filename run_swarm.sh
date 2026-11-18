@@ -103,7 +103,7 @@ echo "🚀 正在启动 Drone 2 (gz_x500, Instance 2)..."
 PX4_GZ_STANDALONE=1 \
 PX4_GZ_WORLD=grass_world \
 PX4_SYS_AUTOSTART=4001 \
-PX4_GZ_MODEL_POSE="20,0" \
+PX4_GZ_MODEL_POSE="30,0" \
 PX4_SIM_MODEL=gz_x500 \
     ./build/px4_sitl_default/bin/px4 -i 2 2>&1 | rotatelogs -n $LOG_MAX_FILES drone2.log $LOG_MAX_SIZE &
 PID2=$!
@@ -125,7 +125,7 @@ echo "  日志限制        : 每个最大 ${LOG_MAX_SIZE}，保留 ${LOG_MAX_FI
 echo "  相机话题        : /camera/image"
 echo "  世界地图        : grass_world"
 echo "  Drone 1 位置   : (0,  0)"
-echo "  Drone 2 位置   : (0, 20)"
+echo "  Drone 2 位置   : (30, 0)"
 echo "================================================"
 echo ""
 echo "  验证命令:"

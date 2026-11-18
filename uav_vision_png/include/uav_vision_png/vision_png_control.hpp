@@ -180,6 +180,8 @@ private:
     bool detect_fresh_ = false;  ///< 是否有新检测帧
 
     // 连续丢失帧计数与阈值
+    int valid_detection_streak_    = 0; ///< 当前连续有效检测帧数
+    int detection_confirm_frames_  = 6; ///< 首次进入拦截前所需连续有效帧数
     int lost_frames_   = 0;
     int lost_thresh_   = 45;   ///< 超过此值切换到 TRACK_LOST（原地搜索）
     int coast_thresh_  = 15;   ///< 低于此值时惯性续飞（约 0.5s@30Hz）
@@ -221,13 +223,29 @@ private:
     double speed_cmd_ = 5.0; ///< 期望冲击速度（m/s）
     double d_gain_   = 2.0;   ///< 速度增量增益（与 los_control 一致）
     double kv_       = 4.0;   ///< 俯仰 PNG 增益（与 los_control kv 对应）
-    double kz_       = 4.0;   ///< 方位 PNG 增益（与 los_control kz 对应）
+    double kz_       = 2.0;   ///< 方位 PNG 增益（与 los_control kz 对应）
+    // 按实际水平速度动态放宽期望速度方向与 LOS 的最大夹角。
+    double los_limit_low_speed_mps_ = 8.0;      ///< 低速段上限 (m/s)
+    double los_limit_mid_speed_mps_ = 10.0;     ///< 中速段上限 (m/s)
+    double los_limit_low_angle_deg_ = 30.0;     ///< 低速最大 LOS 夹角 (deg)
+    double los_limit_mid_angle_deg_ = 45.0;     ///< 中速最大 LOS 夹角 (deg)
+    double max_velocity_los_angle_deg_ = 55.0;  ///< 高速最大 LOS 夹角 (deg)
+
+    // 首次拦截的初始 LOS 限制：先贴近 LOS，再平滑恢复常规动态限制。
+    double initial_los_angle_deg_ = 15.0;          ///< 初始最大 LOS 夹角 (deg)
+    double initial_los_max_duration_s_ = 1.0;      ///< 初始阶段最长保持时间 (s)
+    double initial_los_exit_speed_mps_ = 8.0;      ///< 达到该水平速度后开始退出 (m/s)
+    double initial_los_transition_duration_s_ = 0.4; ///< 恢复常规限制的过渡时间 (s)
+    bool initial_los_limit_active_ = false;
+    bool initial_los_transition_started_ = false;
+    std::chrono::steady_clock::time_point initial_los_limit_start_time_;
+    std::chrono::steady_clock::time_point initial_los_transition_start_time_;
 
     // 偏航跟踪控制（主动 Yaw 跟踪，保持目标在视场中心）
     // d_yaw = k1_yaw * ex + k2_yaw * d(ex)  [rad/s]
-    // 图像宽 1920px，中心960px，最大误差960px
-    // 期望最大偏航率约 0.8 rad/s → k1_yaw ≈ 0.8/960 ≈ 0.0008
-    double k1_yaw_  = 0.0008;   ///< 像素误差比例项增益（rad/s per pixel）
+    // 图像宽 1280px，中心640px，最大误差640px
+    // 1280px 图像最大误差 640px，画面边缘期望约 0.8 rad/s → k1_yaw = 0.00125
+    double k1_yaw_  = 0.00125;  ///< 像素误差比例项增益（rad/s per pixel）
     double k2_yaw_  = 0.0002;   ///< 像素误差微分项增益（rad/s per pixel/frame）
     double d_yaw_   = 0.0;      ///< 当前偏航角速率指令（rad/s）
     double last_ex_ = 0.0;
